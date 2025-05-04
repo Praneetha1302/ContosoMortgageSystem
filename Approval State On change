@@ -1,0 +1,45 @@
+using Contoso_Mortgage_System_Project;
+using Microsoft.Xrm.Sdk;
+using System;
+
+namespace Contoso_Mortgage_System_Project
+{
+    public class MortgageApprovalStatusOnchange : IPlugin
+    {
+        public void Execute(IServiceProvider serviceProvider)
+        {
+            IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+            IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+            IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
+
+            try
+            {
+                if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity mortgageApplication)
+                {
+                    // Ensure the entity is 'contoso_mortgageapplications'
+                    if (mortgageApplication.LogicalName != "contoso_mortgages")
+                        return;
+
+                    
+                    if (!MortgageApplication.IsApprovalStatusApproval(mortgageApplication))
+                        return; // Stop execution if status is not 'Approval'
+
+                    Guid mortgageId = mortgageApplication.Id;
+
+                    // Check if similar payment records already exist
+                    if (MortgageApplication.CheckForExistingPayments(service, mortgageId))
+                    {
+                        return; // If payments already exist, stop further execution
+                    }
+
+                    // Proceed with the payment generation and updates
+                    MortgageApplication.GeneratePaymentsAndUpdateMortgage(service, mortgageId, mortgageApplication);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidPluginExecutionException($"An error occurred in the Approval plugin: {ex.Message}", ex);
+            }
+        }
+    }
+}
