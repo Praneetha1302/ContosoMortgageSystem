@@ -1,0 +1,41 @@
+using Contoso_Mortgage_System_Project;
+using Microsoft.Xrm.Sdk;
+using System;
+
+namespace Contoso_Mortgage_System_Project
+{
+    public class MortgageReviewStatusOnchange : IPlugin
+    {
+        public void Execute(IServiceProvider serviceProvider)
+        {
+            IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+            ITracingService tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
+
+            try
+            {
+                if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity targetEntity)
+                {
+                    // Ensure the entity is 'contoso_mortgageapplications'
+                    if (targetEntity.LogicalName == "contoso_mortgages")
+                    {
+                        // Check if the Approval Status is 'Review' (i.e., 768570001)
+                        if (MortgageApplication.IsApprovalStatusReview(targetEntity))
+                        {
+                            // Assign the Risk Score
+                            MortgageApplication.AssignRiskScore(targetEntity, tracingService);
+                        }
+                        else
+                        {
+                            tracingService.Trace("Approval Status is not 'Review'. Risk Score not updated.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                tracingService.Trace($"An error occurred: {ex.Message}");
+                throw new InvalidPluginExecutionException("Error in Class1 plugin", ex);
+            }
+        }
+    }
+}
