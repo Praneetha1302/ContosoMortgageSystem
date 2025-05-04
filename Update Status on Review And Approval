@@ -1,0 +1,139 @@
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+namespace Contoso_Mortgage_System_Project
+{
+    public static class MortgageApplication
+    {
+        // Method to fetch and assign Risk Score (for Mortgage)
+        public static void AssignRiskScore(Entity targetEntity, ITracingService tracingService)
+        {
+            string apiUrl = "https://api4-bebpdaasaufsawc7.eastasia-01.azurewebsites.net/Home";
+            int firstRandomNumber = FetchFirstRandomNumberAsync(apiUrl, tracingService).GetAwaiter().GetResult();
+            targetEntity["contoso_riskscore"] = firstRandomNumber;
+            tracingService.Trace($"Assigned Risk Score: {firstRandomNumber}");
+        }
+
+        // Method to fetch the first random number from the API
+        private static async Task<int> FetchFirstRandomNumberAsync(string apiUrl, ITracingService tracingService)
+        {
+            using (HttpClient client = new HttpClient())
+            {
+                tracingService.Trace($"Calling API: {apiUrl}");
+                HttpResponseMessage response = await client.GetAsync(apiUrl);
+                response.EnsureSuccessStatusCode();
+
+                string responseContent = await response.Content.ReadAsStringAsync();
+                tracingService.Trace($"API Response: {responseContent}");
+
+                var randomNumbers = Newtonsoft.Json.JsonConvert.DeserializeObject<int[]>(responseContent);
+
+                if (randomNumbers != null && randomNumbers.Length > 0)
+                {
+                    return randomNumbers[0];
+                }
+                else
+                {
+                    throw new Exception("No random numbers returned from API.");
+                }
+            }
+        }
+
+        // Status Check Methods
+        public static bool IsApprovalStatusReview(Entity mortgageApplication)
+        {
+            int approvalStatus = mortgageApplication.GetAttributeValue<OptionSetValue>("contoso_mortgagestatus")?.Value ?? 0;
+            return approvalStatus == 330650001;
+        }
+
+        public static bool IsApprovalStatusApproval(Entity mortgageApplication)
+        {
+            int approvalStatus = mortgageApplication.GetAttributeValue<OptionSetValue>("contoso_mortgagestatus")?.Value ?? 0;
+            return approvalStatus == 330650002;
+        }
+
+        // Method to check if payment records already exist
+        public static bool CheckForExistingPayments(IOrganizationService service, Guid mortgageId)
+        {
+            QueryExpression query = new QueryExpression("contoso_mortgagepayments")
+            {
+                ColumnSet = new ColumnSet(false),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression("contoso_associatedmortgage", ConditionOperator.Equal, mortgageId)
+                    }
+                }
+            };
+
+            EntityCollection existingPayments = service.RetrieveMultiple(query);
+            return existingPayments.Entities.Count > 0;
+        }
+
+        // Generate Payments and Update Mortgage (with Customer and Start Date auto-population)
+        public static void GeneratePaymentsAndUpdateMortgage(IOrganizationService service, Guid mortgageId, Entity mortgageApplication)
+        {
+            // Retrieve full mortgage details including customer
+            Entity updatedMortgageApplication = service.Retrieve(
+                "contoso_mortgages",
+                mortgageId,
+                new ColumnSet("cms_mortgagename", "contoso_mortgagenumber", "contoso_annualpercentagerateapr",
+                              "contoso_statetaxrate", "contoso_riskscore", "contoso_mortgageamount",
+                              "contoso_mortgagetermmonths", "contoso_customer") // Get customer lookup
+            );
+
+            decimal margin = 4m;
+            decimal baseApr = 5m;
+            decimal stateTax = updatedMortgageApplication.GetAttributeValue<decimal?>("contoso_statetaxrate") ?? 0m;
+            int riskScore = updatedMortgageApplication.GetAttributeValue<int?>("contoso_riskscore") ?? 1;
+            Money presentValueMoney = updatedMortgageApplication.GetAttributeValue<Money>("contoso_mortgageamount") ?? new Money(0m);
+            int term = updatedMortgageApplication.GetAttributeValue<int?>("contoso_mortgagetermmonths") ?? 360;
+            string mortgageName = updatedMortgageApplication.GetAttributeValue<string>("cms_mortgagename") ?? "Mortgage";
+
+            decimal finalApr = (baseApr + margin) + (decimal)Math.Log(riskScore) + stateTax;
+            decimal periodicRate = finalApr / 12 / 100;
+            decimal monthlyPayment = (presentValueMoney.Value * periodicRate) /
+                                     (1 - (decimal)Math.Pow(1 + (double)periodicRate, -term));
+
+            DateTime approvalDate = DateTime.Now;
+
+            Entity updateApplication = new Entity("contoso_mortgages")
+            {
+                Id = mortgageId
+            };
+            updateApplication["cms_finalarp"] = finalApr;
+            updateApplication["contoso_monthlypayment"] = new Money(monthlyPayment);
+            updateApplication["contoso_approvaldate"] = approvalDate;
+            service.Update(updateApplication);
+
+            // Retrieve customer reference (if present)
+            EntityReference customerRef = updatedMortgageApplication.GetAttributeValue<EntityReference>("contoso_customer");
+
+            for (int month = 1; month <= term; month++)
+            {
+                DateTime dueDate = approvalDate.AddMonths(month);
+                string paymentName = $"{mortgageName}-MonthlyPay-{month}";
+
+                Entity payment = new Entity("contoso_mortgagepayments")
+                {
+                    ["contoso_name"] = paymentName,
+                    ["contoso_duedate"] = dueDate,
+                    ["contoso_startdate"] = approvalDate, // ✅ Auto-populate start date
+                    ["contoso_associatedmortgage"] = new EntityReference("contoso_mortgages", mortgageId),
+                    ["contoso_paymentamount"] = new Money(monthlyPayment)
+                };
+
+                if (customerRef != null)
+                {
+                    payment["cms_customerlookup"] = customerRef; // ✅ Auto-populate customer lookup
+                }
+
+                service.Create(payment);
+            }
+        }
+    }
+}
